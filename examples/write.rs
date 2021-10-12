@@ -1,9 +1,17 @@
 use nfc_nci::*;
+use std::env;
 use std::{error::Error, sync::mpsc};
 
 fn main() -> Result<(), Box<dyn Error>> {
     const TAG_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     let (tx, rx) = mpsc::channel();
+
+    let msg: String;
+    if let Some(input) = env::args().nth(1) {
+        msg = input;
+    } else {
+        msg = "command:shuffle:on|;apple:album:1025210938".into();
+    }
 
     let mut manager = NFCManager::new();
     manager.initialize()?;
@@ -22,30 +30,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         Err(_) => return Err("Timedout waiting for tag. Is there a tag near the reader?".into()),
     };
     println!("Got tag with UID: {:x?}", tag.uid);
-    let ndef_info = tag.ndef_info()?;
-    println!(
-        "Has NDEF message with size: {} bytes",
-        ndef_info.current_ndef_length
-    );
+
     tag.format()?;
-    let ndef_info = tag.ndef_info()?;
-    println!(
-        "Formatted. Now NDEF message has size: {} bytes",
-        ndef_info.current_ndef_length
-    );
     tag.write_ndef(NdefType::Text{
         language_code: "en".to_string(),
-        text: "Hello world! Hello Rust!".to_string(),
+        text: msg,
     })?;
-    let ndef_info = tag.ndef_info()?;
-    println!(
-        "Wrote tag. Now NDEF message has size: {} bytes",
-        ndef_info.current_ndef_length
-    );
-
     let ndef = tag.read_ndef()?;
-    if let NdefType::Text{text, language_code} = ndef {
-        println!("Read text {} in {}", text, language_code);
+    if let NdefType::Text{text, language_code: _} = ndef {
+        println!("Tag written with: \"{}\"", text);
     }
 
     Ok(())

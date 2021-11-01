@@ -1,11 +1,16 @@
-#[allow(missing_docs)]
+
+#![feature(derive_default_enum, iter_advance_by)]
+#![allow(missing_docs)]
+
 use bitflags::bitflags;
+mod ndef;
+pub use ndef::*;
+
 use nfc_nci_sys as raw;
 use thiserror::Error;
 
-use libffi::high::Closure1;
+use libffi::high::{Closure0, Closure1};
 use num_traits::FromPrimitive;
-use std::ffi::CString;
 
 #[macro_use]
 extern crate num_derive;
@@ -35,112 +40,6 @@ pub enum NFCProtocol {
     IsoDep = 4,
     Iso15693 = 6,
     MiFare = 128,
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum NdefType {
-    /// NDEF text: NFC Forum well-known type + RTD: 0x55
-    Text{
-        language_code: String,
-        text: String
-    },
-    /// NDEF URL: NFC Forum well-known type + RTD: 0x54
-    Url(String),
-    /// Handover select package
-    HandoverSelect,
-    /// Handover request package
-    HandoverRequest,
-    /// Unable to decode
-    Other,
-}
-
-impl NdefType {
-    fn content(&self) -> Result<Vec<std::os::raw::c_uchar>> {
-        let mut content: Vec<std::os::raw::c_uchar>;
-        let content_len;
-        match self {
-            NdefType::Text{language_code, text} => {
-                // Allocate space in a vector for the NDEF.
-                content = Vec::with_capacity(text.len() + 10);
-
-                let language_code_ptr = CString::new(language_code.as_str())
-                    .or(Err(NdefError("Invalid language code".into())))?
-                    .into_raw();
-                let text_content_ptr = CString::new(text.as_str())
-                    .or(Err(NdefError("Invalid text".into())))?
-                    .into_raw();
-                content_len = unsafe {
-                    raw::ndef_createText(
-                        language_code_ptr,
-                        text_content_ptr,
-                        content.as_mut_ptr(),
-                        content.capacity().try_into().unwrap(),
-                    )
-                };
-                // Make sure raw pointer memory is freed, per into_raw() docs
-                let (_, _) = unsafe {
-                    (
-                        CString::from_raw(language_code_ptr),
-                        CString::from_raw(text_content_ptr),
-                    )
-                };
-            }
-            _ => todo!(),
-        }
-
-        if content_len <= 0 {
-            Err(TagError("Failed to encode NDEF text.".into()))
-        } else {
-            unsafe { content.set_len(content_len.try_into().unwrap()) };
-            Ok(content)
-        }
-    }
-}
-
-impl TryFrom<(u32, Vec<std::os::raw::c_uchar>)> for NdefType {
-    type Error = NFCError;
-
-    fn try_from(type_content: (u32, Vec<std::os::raw::c_uchar>)) -> Result<Self> {
-        let (kind, mut content) = type_content;
-        match kind {
-            0 => {
-                // The text content is less than the ndef content in size. Use u8 for conversion to CString.
-                let mut text_content: Vec<u8> = Vec::with_capacity(content.len());
-                let mut lc_content: Vec<u8> = Vec::with_capacity(content.len());
-                let (text_len, lc_len);
-                unsafe {
-                    text_len = raw::ndef_readText(
-                        content.as_mut_ptr(),
-                        content.len().try_into().unwrap(),
-                        text_content.as_mut_ptr() as *mut std::os::raw::c_char,
-                        text_content.capacity().try_into().unwrap(),
-                    );
-                    lc_len = raw::ndef_readLanguageCode(
-                        content.as_mut_ptr(),
-                        content.len().try_into().unwrap(),
-                        lc_content.as_mut_ptr() as *mut std::os::raw::c_char,
-                        lc_content.capacity().try_into().unwrap(),
-                    )
-                };
-                if text_len > -1 && lc_len > -1 {
-                    unsafe {
-                        text_content.set_len(text_len.try_into().unwrap());
-                        lc_content.set_len(lc_len.try_into().unwrap());
-                    };
-                    // let text = CString::new(&text_content[..text_len.try_into().unwrap()]).unwrap();
-                    let text = CString::new(text_content).unwrap();
-                    let language_code = CString::new(lc_content).unwrap();
-                    Ok(Self::Text{
-                        language_code: language_code.to_str().unwrap().into(),
-                        text: text.to_str().unwrap().into(),
-                    })
-                } else {
-                    Err(NdefError("Failed to extract text from NDEF".into()))
-                }
-            },
-            _ => todo!()
-        }
-    }
 }
 
 /// Description of the tag found by the reader
@@ -189,7 +88,7 @@ impl NfcTag {
         }
     }
 
-    pub fn write_ndef(&self, ndef: NdefType) -> Result<()> {
+    pub fn write_ndef(&self, ndef: NdefMessage) -> Result<()> {
         let mut ndef_content = ndef.content()?;
         let res = unsafe {
             raw::nfcTag_writeNdef(
@@ -204,27 +103,27 @@ impl NfcTag {
         Ok(())
     }
 
-    pub fn read_ndef(&self) -> Result<NdefType> {
+    pub fn read_ndef(&self) -> Result<NdefMessage> {
         let ndef_info = self.ndef_info()?;
-        let mut ndef_content: Vec<std::os::raw::c_uchar> =
+        let mut ndef_content: Vec<u8> =
             Vec::with_capacity(ndef_info.current_ndef_length.try_into().unwrap());
-        let mut ndef_type: raw::nfc_friendly_type_t = Default::default();
+        let mut _ndef_type = raw::nfc_friendly_type_t::default();
         let ndef_len = unsafe {
             // This writes into the content vector via raw pointer
             raw::nfcTag_readNdef(
                 self.handle,
                 ndef_content.as_mut_ptr(),
                 ndef_info.current_ndef_length,
-                &mut ndef_type,
+                &mut _ndef_type,
             )
         };
 
-        if ndef_len == -1 {
-            return Err(TagError("Failed to read NDEF text record from tag".into()));
+        if ndef_len < 0 {
+            return Err(TagError("Failed to read NDEF message from tag".into()));
         }
         // We have to tell the vector that we wrote in the space we allocated
         unsafe { ndef_content.set_len(ndef_len.try_into().unwrap()) };
-        NdefType::try_from((ndef_type, ndef_content))
+        Ok(ndef_content.as_slice().into())
     }
 }
 
@@ -256,9 +155,16 @@ struct OnArrivalCallback<'a> {
     c_closure: Closure1<'a, *mut raw::nfc_tag_info_t, ()>,
 }
 
+struct OnDepartureCallback<'a> {
+    /// Create a raw pointer with Box::into_raw.
+    _rust_closure: Box<dyn Fn()>,
+    c_closure: Closure0<'a, ()>,
+}
+
 #[derive(Default)]
 pub struct NFCManager<'a> {
     on_arrival: Option<OnArrivalCallback<'a>>,
+    on_departure: Option<OnDepartureCallback<'a>>,
     tag_callbacks: raw::nfcTagCallback_t,
 }
 
@@ -281,35 +187,50 @@ impl<'a> NFCManager<'a> {
         Ok(())
     }
 
-    pub fn register_tag_callbacks(&mut self, on_arrival: Option<impl Fn(NfcTag) + 'static>) {
-        match on_arrival {
-            Some(cb) => {
-                // Wrap the given callback in a callback that transforms the tag info
-                let rust_closure =
-                    Box::new(move |tag_info: *mut raw::nfc_tag_info_t| cb(tag_info.into()));
-                // We need to store both this (rust) closure as well as a C fn
-                // pointer callback that references it. Rust's lifetime rules
-                // don't recognize that the Boxed closure lives as long as Box
-                // (not just the borrow for the C fn pointer) so we have to use
-                // a raw pointer here.
-                let rust_closure_ptr = Box::into_raw(rust_closure);
-                let c_closure = unsafe { Closure1::new(&*rust_closure_ptr) };
-                self.on_arrival = Some(OnArrivalCallback {
-                    _rust_closure: unsafe { Box::from_raw(rust_closure_ptr) },
-                    c_closure,
-                });
+    pub fn register_tag_callbacks(
+        &mut self,
+        on_arrival: Option<impl Fn(NfcTag) + 'static>,
+        on_departure: Option<impl Fn() + 'static>,
+    ) {
+        if let Some(cb) = on_arrival {
+            // Wrap the given callback in a callback that transforms the tag info
+            let rust_closure =
+                Box::new(move |tag_info: *mut raw::nfc_tag_info_t| cb(tag_info.into()));
+            // We need to store both this (rust) closure as well as a C fn
+            // pointer callback that references it. Rust's lifetime rules
+            // don't recognize that the Boxed closure lives as long as Box
+            // (not just the borrow for the C fn pointer) so we have to use
+            // a raw pointer here.
+            let rust_closure_ptr = Box::into_raw(rust_closure);
+            let c_closure = unsafe { Closure1::new(&*rust_closure_ptr) };
+            self.on_arrival = Some(OnArrivalCallback {
+                _rust_closure: unsafe { Box::from_raw(rust_closure_ptr) },
+                c_closure,
+            });
 
-                // Here we get a raw pointer to the C fn inside the c_closure.
-                // As long as c_closure exists, which it should because we're
-                // storing it in this struct, this address should be stable.
-                self.tag_callbacks.onTagArrival = unsafe {
-                    Some(std::mem::transmute(
-                        *self.on_arrival.as_ref().unwrap().c_closure.code_ptr(),
-                    ))
-                }
+            // Here we get a raw pointer to the C fn inside the c_closure.
+            // As long as c_closure exists, which it should because we're
+            // storing it in this struct, this address should be stable.
+            self.tag_callbacks.onTagArrival = unsafe {
+                Some(std::mem::transmute(
+                    *self.on_arrival.as_ref().unwrap().c_closure.code_ptr(),
+                ))
             }
-            None => (),
-        };
+        }
+        if let Some(cb) = on_departure {
+            let rust_closure = Box::new(move || cb());
+            let rust_closure_ptr = Box::into_raw(rust_closure);
+            let c_closure = unsafe { Closure0::new(&*rust_closure_ptr) };
+            self.on_departure = Some(OnDepartureCallback {
+                _rust_closure: unsafe { Box::from_raw(rust_closure_ptr) },
+                c_closure,
+            });
+            self.tag_callbacks.onTagDeparture = unsafe {
+                Some(std::mem::transmute(
+                    *self.on_departure.as_ref().unwrap().c_closure.code_ptr(),
+                ))
+            }
+        }
 
         unsafe { raw::nfcManager_registerTagCallback(&mut self.tag_callbacks) };
     }
@@ -346,13 +267,6 @@ pub enum NFCError {
     TagError(String),
     #[error("Error in NDEF: {0}")]
     NdefError(String),
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
+    #[error("Error in NDEF: Record invalid")]
+    NdefRecordInvalid,
 }

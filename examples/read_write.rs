@@ -7,13 +7,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut manager = NFCManager::new();
     manager.initialize()?;
-    manager.register_tag_callbacks(Some(move |tag_info| {
+    let tx2 = tx.clone();
+    let arrival_callback = move |tag| {
         // How to handle failed send?
-        match tx.send(tag_info) {
+        println!("Tag arrived.");
+        match tx2.send(tag) {
             Err(_) => println!("Error sending from callback"),
             _ => (),
-        }
-    }));
+        };
+    };
+    let departure_callback = move || {
+        println!("Tag departed");
+    };
+    manager.register_tag_callbacks(Some(arrival_callback), Some(departure_callback));
+
     manager.enable_discovery(None, Some(true), None, None);
 
     // Wait for tag
@@ -33,19 +40,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Formatted. Now NDEF message has size: {} bytes",
         ndef_info.current_ndef_length
     );
-    tag.write_ndef(NdefType::Text{
+    tag.write_ndef(
+        [NdefRecord::Text{
         language_code: "en".to_string(),
-        text: "Hello world! Hello Rust!".to_string(),
-    })?;
+        text: "Hello world!".to_string(),
+    }, 
+    NdefRecord::Text{
+        language_code: "en".to_string(),
+        text: "Hello rust!".to_string(),
+    }][..].into())?;
     let ndef_info = tag.ndef_info()?;
     println!(
         "Wrote tag. Now NDEF message has size: {} bytes",
         ndef_info.current_ndef_length
     );
 
-    let ndef = tag.read_ndef()?;
-    if let NdefType::Text{text, language_code} = ndef {
-        println!("Read text {} in {}", text, language_code);
+    let mut ndef_iter = tag.read_ndef()?.into_iter();
+    while let Some(NdefRecord::Text{text, language_code}) = ndef_iter.next() {
+        println!("Read text record in {}: {}", language_code, text);
     }
 
     Ok(())

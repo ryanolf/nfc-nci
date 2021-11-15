@@ -251,6 +251,20 @@ impl<'a> NFCManager<'a> {
             )
         };
     }
+
+    pub fn get_num_tags(&self) -> usize {
+        unsafe {
+            raw::nfcManager_getNumTags() as usize
+        }
+    }
+
+    pub fn get_next_tag(&self) -> Result<()> {
+        if unsafe { raw::nfcManager_selectNextTag() } == 0 {
+            Ok(())
+        } else {
+            Err(NFCError::ManagerError("Failure selecting next tag".into()))
+        }
+    }
 }
 
 impl<'a> Drop for NFCManager<'a> {

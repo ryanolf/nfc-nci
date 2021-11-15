@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 use std::slice::Iter;
 use bitflags::bitflags;
 

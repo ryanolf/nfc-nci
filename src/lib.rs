@@ -2,6 +2,8 @@
 #![feature(derive_default_enum, iter_advance_by)]
 #![allow(missing_docs)]
 
+use std::{marker::PhantomPinned};
+
 use bitflags::bitflags;
 mod ndef;
 pub use ndef::*;
@@ -43,6 +45,7 @@ pub enum NFCProtocol {
 }
 
 /// Description of the tag found by the reader
+#[derive(Clone)]
 pub struct NfcTag {
     /// The technology of the tag
     pub technology: NFATechnology,
@@ -151,15 +154,25 @@ impl From<&raw::ndef_info_t> for NdefInfo {
 
 struct OnArrivalCallback<'a> {
     /// Create a raw pointer with Box::into_raw.
-    _rust_closure: Box<dyn Fn(*mut raw::nfc_tag_info_t)>,
+    _rust_closure: Box<dyn Fn(*mut raw::nfc_tag_info_t) + Send>,
     c_closure: Closure1<'a, *mut raw::nfc_tag_info_t, ()>,
+    _pin: PhantomPinned,
 }
 
 struct OnDepartureCallback<'a> {
     /// Create a raw pointer with Box::into_raw.
-    _rust_closure: Box<dyn Fn()>,
+    _rust_closure: Box<dyn Fn() + Send>,
     c_closure: Closure0<'a, ()>,
+    _pin: PhantomPinned,
 }
+
+// SAFETY
+// These are "read only" except when created in register_tag_callbacks
+// The only thread that mutates anything is the NFC library thread.
+unsafe impl Send for OnArrivalCallback<'_> {}
+unsafe impl Send for OnDepartureCallback<'_> {}
+unsafe impl Sync for OnArrivalCallback<'_> {}
+unsafe impl Sync for OnDepartureCallback<'_> {}
 
 #[derive(Default)]
 pub struct NFCManager<'a> {
@@ -189,8 +202,8 @@ impl<'a> NFCManager<'a> {
 
     pub fn register_tag_callbacks(
         &mut self,
-        on_arrival: Option<impl Fn(NfcTag) + 'static>,
-        on_departure: Option<impl Fn() + 'static>,
+        on_arrival: Option<impl Fn(NfcTag) + 'static + Send>,
+        on_departure: Option<impl Fn() + 'static + Send>,
     ) {
         if let Some(cb) = on_arrival {
             // Wrap the given callback in a callback that transforms the tag info
@@ -206,6 +219,7 @@ impl<'a> NFCManager<'a> {
             self.on_arrival = Some(OnArrivalCallback {
                 _rust_closure: unsafe { Box::from_raw(rust_closure_ptr) },
                 c_closure,
+                _pin : PhantomPinned
             });
 
             // Here we get a raw pointer to the C fn inside the c_closure.
@@ -224,6 +238,7 @@ impl<'a> NFCManager<'a> {
             self.on_departure = Some(OnDepartureCallback {
                 _rust_closure: unsafe { Box::from_raw(rust_closure_ptr) },
                 c_closure,
+                _pin: PhantomPinned
             });
             self.tag_callbacks.onTagDeparture = unsafe {
                 Some(std::mem::transmute(

@@ -1,8 +1,4 @@
-
-#![feature(derive_default_enum, iter_advance_by)]
-#![allow(missing_docs)]
-
-use std::{marker::PhantomPinned};
+use std::marker::PhantomPinned;
 
 use bitflags::bitflags;
 mod ndef;
@@ -21,6 +17,7 @@ use NFCError::*;
 type Result<T> = std::result::Result<T, NFCError>;
 
 bitflags! {
+    #[derive(PartialEq, Eq, Hash, Debug, Clone, Copy)]
     pub struct NFATechnology: u32 {
         const A = 1;
         const B = 2;
@@ -219,7 +216,7 @@ impl<'a> NFCManager<'a> {
             self.on_arrival = Some(OnArrivalCallback {
                 _rust_closure: unsafe { Box::from_raw(rust_closure_ptr) },
                 c_closure,
-                _pin : PhantomPinned
+                _pin: PhantomPinned,
             });
 
             // Here we get a raw pointer to the C fn inside the c_closure.
@@ -238,7 +235,7 @@ impl<'a> NFCManager<'a> {
             self.on_departure = Some(OnDepartureCallback {
                 _rust_closure: unsafe { Box::from_raw(rust_closure_ptr) },
                 c_closure,
-                _pin: PhantomPinned
+                _pin: PhantomPinned,
             });
             self.tag_callbacks.onTagDeparture = unsafe {
                 Some(std::mem::transmute(
@@ -268,9 +265,7 @@ impl<'a> NFCManager<'a> {
     }
 
     pub fn get_num_tags(&self) -> usize {
-        unsafe {
-            raw::nfcManager_getNumTags() as usize
-        }
+        unsafe { raw::nfcManager_getNumTags() as usize }
     }
 
     pub fn get_next_tag(&self) -> Result<()> {

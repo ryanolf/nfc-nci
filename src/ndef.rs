@@ -1,5 +1,5 @@
-use std::slice::Iter;
 use bitflags::bitflags;
+use std::slice::Iter;
 
 use crate::{
     NFCError::{self, NdefError, NdefRecordInvalid},
@@ -12,7 +12,7 @@ const RTD_TEXT: u8 = 0x54;
 const RTD_URL: u8 = 0x55;
 
 bitflags! {
-    #[derive(Default)]
+    #[derive(Default, PartialEq, Eq, Hash, Debug, Clone, Copy)]
     struct NdefRecordFlags: u8 {
         const MESSAGE_BEGIN = 0x80;
         const MESSAGE_END = 0x40;
@@ -186,7 +186,7 @@ impl TryFrom<&mut Iter<'_, u8>> for NdefRecord {
         };
         let payload_type = take_and_advance(iter, type_length)?;
 
-        iter.advance_by(id_length).or(Err(NdefRecordInvalid))?; // Skip the ID, put iter at payload.
+        let _id = take_and_advance(iter, id_length)?; // Skip the ID, put iter at payload.
         let payload = take_and_advance(iter, payload_length)?;
 
         if NdefRecordFlags::TNF_WELLKNOWN == (flags & NdefRecordFlags::TNF_BITS) {
@@ -206,14 +206,15 @@ impl TryFrom<&mut Iter<'_, u8>> for NdefRecord {
                     .to_string();
                     let text = std::str::from_utf8(
                         payload
-                            .get(
-                                1 + language_code_length..payload_length,
-                            )
+                            .get(1 + language_code_length..payload_length)
                             .ok_or(NdefRecordInvalid)?,
                     )
                     .or(Err(NdefRecordInvalid))?
                     .to_string();
-                    Ok(NdefRecord::Text{language_code, text})
+                    Ok(NdefRecord::Text {
+                        language_code,
+                        text,
+                    })
                 }
                 [RTD_URL] => todo!(),
                 _ => {
@@ -233,8 +234,12 @@ impl TryFrom<&mut Iter<'_, u8>> for NdefRecord {
 
 fn take_and_advance<'a>(iter: &mut Iter<'a, u8>, n: usize) -> Result<&'a [u8]> {
     let slice = iter.as_slice();
-    iter.advance_by(n).or(Err(NdefRecordInvalid))?;
-    slice.get(..n).ok_or(NdefRecordInvalid)
+    if slice.len() < n {
+        return Err(NdefRecordInvalid);
+    }
+    let (result, remaining) = slice.split_at(n);
+    *iter = remaining.iter();
+    Ok(result)
 }
 
 impl NdefMessage {
@@ -270,7 +275,9 @@ impl From<NdefRecord> for NdefMessage {
 
 impl From<&[NdefRecord]> for NdefMessage {
     fn from(recs: &[NdefRecord]) -> Self {
-        NdefMessage { records: recs.to_vec() }
+        NdefMessage {
+            records: recs.to_vec(),
+        }
     }
 }
 

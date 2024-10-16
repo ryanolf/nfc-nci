@@ -74,9 +74,7 @@ impl NdefRecord {
     }
 
     fn tnf(&self) -> NdefRecordFlags {
-        match self {
-            _ => NdefRecordFlags::TNF_WELLKNOWN,
-        }
+        NdefRecordFlags::TNF_WELLKNOWN
     }
 
     /// Do not support ID fields, chunking.
@@ -192,11 +190,11 @@ impl TryFrom<&mut Iter<'_, u8>> for NdefRecord {
         if NdefRecordFlags::TNF_WELLKNOWN == (flags & NdefRecordFlags::TNF_BITS) {
             match *payload_type {
                 [RTD_TEXT] => {
-                    let flags = payload.get(0).ok_or(NdefRecordInvalid)?;
+                    let flags = payload.first().ok_or(NdefRecordInvalid)?;
                     if *flags & RTD_TEXT_FLAG_UTF16 != 0 {
                         return Err(NdefError("UTF16 not supported".into()));
                     }
-                    let language_code_length = (flags & RTD_TEXT_LC_LENGTH_MASK as u8) as usize;
+                    let language_code_length = (flags & RTD_TEXT_LC_LENGTH_MASK) as usize;
                     let language_code = std::str::from_utf8(
                         payload
                             .get(1..1 + language_code_length)
@@ -217,17 +215,15 @@ impl TryFrom<&mut Iter<'_, u8>> for NdefRecord {
                     })
                 }
                 [RTD_URL] => todo!(),
-                _ => {
-                    return Err(NdefError(format!(
-                        "Well known type {} not implemented",
-                        String::from_utf8_lossy(payload_type)
-                    )))
-                }
+                _ => Err(NdefError(format!(
+                    "Well known type {} not implemented",
+                    String::from_utf8_lossy(payload_type)
+                ))),
             }
         } else {
-            return Err(NdefError(
+            Err(NdefError(
                 "Record type format invalid or not implemented".into(),
-            ));
+            ))
         }
     }
 }

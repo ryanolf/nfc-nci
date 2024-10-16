@@ -11,9 +11,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let arrival_callback = move |tag| {
         // How to handle failed send?
         println!("Tag arrived.");
-        match tx2.send(tag) {
-            Err(_) => println!("Error sending from callback"),
-            _ => (),
+        if tx2.send(tag).is_err() {
+            println!("Error sending from callback")
         };
     };
     let departure_callback = move || {
@@ -41,14 +40,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         ndef_info.current_ndef_length
     );
     tag.write_ndef(
-        [NdefRecord::Text{
-        language_code: "en".to_string(),
-        text: "Hello world!".to_string(),
-    }, 
-    NdefRecord::Text{
-        language_code: "en".to_string(),
-        text: "Hello rust!".to_string(),
-    }][..].into())?;
+        [
+            NdefRecord::Text {
+                language_code: "en".to_string(),
+                text: "Hello world!".to_string(),
+            },
+            NdefRecord::Text {
+                language_code: "en".to_string(),
+                text: "Hello rust!".to_string(),
+            },
+        ][..]
+            .into(),
+    )?;
     let ndef_info = tag.ndef_info()?;
     println!(
         "Wrote tag. Now NDEF message has size: {} bytes",
@@ -56,7 +59,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let mut ndef_iter = tag.read_ndef()?.into_iter();
-    while let Some(NdefRecord::Text{text, language_code}) = ndef_iter.next() {
+    while let Some(NdefRecord::Text {
+        text,
+        language_code,
+    }) = ndef_iter.next()
+    {
         println!("Read text record in {}: {}", language_code, text);
     }
 

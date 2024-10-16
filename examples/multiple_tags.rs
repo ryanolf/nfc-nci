@@ -11,9 +11,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let arrival_callback = move |tag| {
         // How to handle failed send?
         // println!("Tag arrived.");
-        match tx2.send(tag) {
-            Err(_) => println!("Error sending from callback"),
-            _ => (),
+        if tx2.send(tag).is_err() {
+            println!("Error sending from callback")
         };
     };
     // let departure_callback = move || {
@@ -33,16 +32,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 println!("There are {} tags found", num_tags);
             }
             let ndef_info = tag.ndef_info()?;
-            println!("Got tag with UID {:x?} and size {} bytes", tag.uid, ndef_info.current_ndef_length);
+            println!(
+                "Got tag with UID {:x?} and size {} bytes",
+                tag.uid, ndef_info.current_ndef_length
+            );
             if tag_number < num_tags {
                 manager.get_next_tag()?;
-                tag_number = tag_number + 1;
+                tag_number += 1;
             } else {
-                break
+                break;
             }
         }
     }
-
 
     Ok(())
 }

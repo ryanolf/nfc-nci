@@ -1,3 +1,4 @@
+use nfc_nci::ndef::*;
 use nfc_nci::*;
 use std::env;
 use std::{error::Error, sync::mpsc};
@@ -6,11 +7,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     const TAG_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     let (tx, rx) = mpsc::channel();
 
-    let mut manager = NFCManager::new();
-    if let Err(e) = manager.initialize() {
-        println!("Error initializing NFC: {}", e);
-        return Err(Box::new(e));
-    }
+    let mut manager = NFCManager::initialize()?;
+
     manager.register_tag_callbacks(
         Some(move |tag_info| {
             // How to handle failed send?
@@ -28,7 +26,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Ok(tag) => tag,
         Err(_) => return Err("Timedout waiting for tag. Is there a tag near the reader?".into()),
     };
-    println!("Got tag with UID: {:x?}", tag.uid);
+    println!("Got tag with UID: {:x?}", tag.uid());
 
     tag.format()?;
 

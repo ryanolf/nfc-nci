@@ -5,8 +5,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     const TAG_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     let (tx, rx) = mpsc::channel();
 
-    let mut manager = NFCManager::new();
-    manager.initialize()?;
+    let mut manager = NFCManager::initialize()?;
     let tx2 = tx.clone();
     let arrival_callback = move |tag| {
         // How to handle failed send?
@@ -34,7 +33,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             let ndef_info = tag.ndef_info()?;
             println!(
                 "Got tag with UID {:x?} and size {} bytes",
-                tag.uid, ndef_info.current_ndef_length
+                tag.uid(),
+                ndef_info.current_ndef_length()
             );
             if tag_number < num_tags {
                 manager.get_next_tag()?;

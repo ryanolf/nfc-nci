@@ -10,9 +10,10 @@ const RTD_TEXT_FLAG_UTF16: u8 = 0x80;
 const RTD_TEXT_LC_LENGTH_MASK: u8 = 63;
 const RTD_TEXT: u8 = 0x54;
 const RTD_URL: u8 = 0x55;
+const TNF_WELLKNOWN: u8 = 0x01;
 
 bitflags! {
-    #[derive(Default, PartialEq, Eq, Hash, Debug, Clone, Copy)]
+    #[derive(Default)]
     struct NdefRecordFlags: u8 {
         const MESSAGE_BEGIN = 0x80;
         const MESSAGE_END = 0x40;
@@ -20,7 +21,6 @@ bitflags! {
         const SHORT = 0x10;
         const ID = 0x08;
         const TNF_BITS = 0x07;
-        const TNF_WELLKNOWN = 0x01;
     }
 }
 
@@ -74,7 +74,7 @@ impl NdefRecord {
     }
 
     fn tnf(&self) -> NdefRecordFlags {
-        NdefRecordFlags::TNF_WELLKNOWN
+        NdefRecordFlags::from_bits_truncate(TNF_WELLKNOWN)
     }
 
     /// Do not support ID fields, chunking.
@@ -187,7 +187,7 @@ impl TryFrom<&mut Iter<'_, u8>> for NdefRecord {
         let _id = take_and_advance(iter, id_length)?; // Skip the ID, put iter at payload.
         let payload = take_and_advance(iter, payload_length)?;
 
-        if NdefRecordFlags::TNF_WELLKNOWN == (flags & NdefRecordFlags::TNF_BITS) {
+        if TNF_WELLKNOWN == (flags & NdefRecordFlags::TNF_BITS).bits() {
             match *payload_type {
                 [RTD_TEXT] => {
                     let flags = payload.first().ok_or(NdefRecordInvalid)?;
@@ -291,6 +291,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn it_makes_text_record() -> Result<()> {
         let msg = NdefRecord::Text {
             language_code: "en".to_string(),

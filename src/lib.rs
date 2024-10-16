@@ -1,9 +1,48 @@
-use core::ptr::NonNull;
+//! # NFC-NCI
+//!
+//! These are the Rust-y "safe" bindings for NXP's [linux_nfc-nci library](https://github.com/NXPNFCLinux/linux_libnfc-nci).
+//! They depend on the [low-level FFI bindings](https://github.com/ryanolf/nfc-nci-sys/) which are at present specified as a path dependency.
+//!
+//! This code doesn't completely cover the capability in linux_nfc-nci yet, but the bits here (reading and writing NDEF) are quite functional.
+//!
+//! ## Features
+//!
+//! - NFC tag reading and writing
+//! - NDEF message parsing and creation
+//!
+//! ## Usage
+//!
+//! Add this to your `Cargo.toml`:
+//!
+//! ```toml
+//! [dependencies]
+//! nfc-nci = "0.1.1"
+//! ```
+//!
+//! Then use the crate in your Rust code:
+//!
+//! ```rust
+//! use nfc_nci::{NFCManager, NFATechnology};
+//!
+//! let mut manager = NFCManager::initialize()?;
+//! let arrival_callback = move |_tag| {
+//!     println!("Tag arrived.");
+//! };
+//! let departure_callback = move || {
+//!     println!("Tag departed");
+//! };
+//! manager.register_tag_callbacks(Some(arrival_callback), Some(departure_callback));
+//! manager.enable_discovery(None, Some(true), None, None);
+//! ```
+//!
+//! For more detailed examples, see the [examples](https://github.com/ryanolf/nfc-nci/tree/main/examples) directory.
 
-use aliasable::boxed::AliasableBox;
+#[macro_use]
+extern crate num_derive;
+
 use bitflags::bitflags;
-mod ndef;
-pub use ndef::*;
+use core::ptr::NonNull;
+use ndef::NdefMessage;
 
 use nfc_nci_sys as raw;
 use thiserror::Error;
@@ -11,14 +50,12 @@ use thiserror::Error;
 use libffi::high::{Closure0, Closure1};
 use num_traits::FromPrimitive;
 
-#[macro_use]
-extern crate num_derive;
+pub mod ndef;
 
-use NFCError::*;
 type Result<T> = std::result::Result<T, NFCError>;
 
 bitflags! {
-    #[derive(PartialEq, Eq, Hash, Debug, Clone, Copy)]
+    #[derive(Clone, Copy)]
     pub struct NFATechnology: u32 {
         const A = 1;
         const B = 2;
@@ -31,6 +68,7 @@ bitflags! {
     }
 }
 
+/// The NFC protocol used by the tag according to the reader
 #[derive(FromPrimitive, Debug, PartialEq, Copy, Clone)]
 pub enum NFCProtocol {
     Unknown = 0,
@@ -46,13 +84,13 @@ pub enum NFCProtocol {
 #[derive(Clone)]
 pub struct NfcTag {
     /// The technology of the tag
-    pub technology: NFATechnology,
+    technology: NFATechnology,
     /// The handle of the tag
-    pub handle: u32,
+    handle: u32,
     /// The uid of the tag (hexadecimal)
-    pub uid: Vec<u8>,
+    uid: Vec<u8>,
     /// The tag protocol
-    pub protocol: NFCProtocol,
+    protocol: NFCProtocol,
 }
 
 impl From<&raw::nfc_tag_info_t> for NfcTag {
@@ -67,26 +105,48 @@ impl From<&raw::nfc_tag_info_t> for NfcTag {
 }
 
 impl NfcTag {
-    /// If a tag that can be Ndef is found, returns NdefInfo
+    /// Returns the technology of the tag
+    pub fn technology(&self) -> NFATechnology {
+        self.technology
+    }
+
+    /// Returns the handle of the tag
+    pub fn handle(&self) -> u32 {
+        self.handle
+    }
+
+    /// Returns a reference to the UID of the tag
+    pub fn uid(&self) -> &[u8] {
+        &self.uid
+    }
+
+    /// Returns the protocol of the tag
+    pub fn protocol(&self) -> NFCProtocol {
+        self.protocol
+    }
+
+    /// If a tag that can be Ndef is found, returns NdefInfo, otherwise returns an error
     pub fn ndef_info(&self) -> Result<NdefInfo> {
         let mut ndef_info: raw::ndef_info_t = Default::default();
         unsafe { raw::nfcTag_isNdef(self.handle, &mut ndef_info) };
         let ndef_info: NdefInfo = (&ndef_info).into();
         if ndef_info.max_ndef_length == 0 {
-            Err(TagError("Could not obtain tag info.".into()))
+            Err(NFCError::TagError("Could not obtain tag info.".into()))
         } else {
             Ok(ndef_info)
         }
     }
 
+    /// Formats the tag, erasing all data on it
     pub fn format(&self) -> Result<()> {
         if unsafe { raw::nfcTag_formatTag(self.handle) } != 0 {
-            Err(TagError("Failed to format tag".into()))
+            Err(NFCError::TagError("Failed to format tag".into()))
         } else {
             Ok(())
         }
     }
 
+    /// Writes an NDEF message to the tag
     pub fn write_ndef(&self, ndef: NdefMessage) -> Result<()> {
         let mut ndef_content = ndef.content()?;
         let res = unsafe {
@@ -97,11 +157,12 @@ impl NfcTag {
             )
         };
         if res != 0 {
-            return Err(TagError("Failed to write to tag".into()));
+            return Err(NFCError::TagError("Failed to write to tag".into()));
         }
         Ok(())
     }
 
+    /// Reads the NDEF message from the tag
     pub fn read_ndef(&self) -> Result<NdefMessage> {
         let ndef_info = self.ndef_info()?;
         let mut ndef_content: Vec<u8> =
@@ -118,7 +179,9 @@ impl NfcTag {
         };
 
         if ndef_len < 0 {
-            return Err(TagError("Failed to read NDEF message from tag".into()));
+            return Err(NFCError::TagError(
+                "Failed to read NDEF message from tag".into(),
+            ));
         }
         // We have to tell the vector that we wrote in the space we allocated
         unsafe { ndef_content.set_len(ndef_len.try_into().unwrap()) };
@@ -126,11 +189,34 @@ impl NfcTag {
     }
 }
 
+/// Information about the NDEF capabilities of the tag
 pub struct NdefInfo {
-    pub is_ndef: bool,
-    pub is_writable: bool,
-    pub current_ndef_length: u32,
-    pub max_ndef_length: u32,
+    is_ndef: bool,
+    is_writable: bool,
+    current_ndef_length: u32,
+    max_ndef_length: u32,
+}
+
+impl NdefInfo {
+    /// Returns whether the tag contains an NDEF message
+    pub fn is_ndef(&self) -> bool {
+        self.is_ndef
+    }
+
+    /// Returns whether the tag is writable
+    pub fn is_writable(&self) -> bool {
+        self.is_writable
+    }
+
+    /// Returns the current length of the NDEF message on the tag
+    pub fn current_ndef_length(&self) -> u32 {
+        self.current_ndef_length
+    }
+
+    /// Returns the maximum length of an NDEF message that can be written to the tag
+    pub fn max_ndef_length(&self) -> u32 {
+        self.max_ndef_length
+    }
 }
 
 impl From<&raw::ndef_info_t> for NdefInfo {
@@ -144,124 +230,168 @@ impl From<&raw::ndef_info_t> for NdefInfo {
     }
 }
 
-struct OnArrivalCallback {
-    // Make sure c_closure is dropped before _rust_closure as it references it
-    c_closure: Closure1<'static, *mut raw::nfc_tag_info_t, ()>,
-    _rust_closure: AliasableBox<dyn Fn(*mut raw::nfc_tag_info_t) + Send>,
-    // _pin: PhantomPinned,
+/// A NonNull pointer that is derived from Box::into_raw and handles dropping the
+/// original Box/deallocating the memory. It "owns" the pointer memory.
+struct NonNullOwned<T: ?Sized>(NonNull<T>);
+
+impl<T> NonNullOwned<T> {
+    fn new(value: T) -> Self {
+        Self(
+            NonNull::new(Box::into_raw(Box::new(value)))
+                .expect("Box::into_raw guarantees nonnull pointer"),
+        )
+    }
 }
 
+impl<T: ?Sized> Drop for NonNullOwned<T> {
+    fn drop(&mut self) {
+        // SAFETY: The pointer should be generated by Box::into_raw
+        let _ = unsafe { Box::from_raw(self.0.as_ptr()) };
+    }
+}
+
+/// Self-referential struct to store the owned on-arrival rust callback along
+/// with the c-closure containing reference to the callback.
+struct OnArrivalCallback {
+    // Make sure c_closure is dropped before _rust_closure as former references
+    // memory "owned" by the later
+    /// The c-closure containing reference to the callback
+    c_closure: Closure1<'static, *mut raw::nfc_tag_info_t, ()>,
+
+    /// The "owned" rust callback
+    ///
+    /// We store the callback in NonNullOwned rather than a Box because the
+    /// compiler assumes that when Box is created (or moved) it is a unique
+    /// (unaliased) reference to the allocation and can optimize for this,
+    /// leading to potential undefined behavior if this is not the case. In this
+    /// case, the reference in the c-closure is obtained via a raw pointer (to
+    /// get around lifetime rules with self-referential structs) and so the Box
+    /// would not be a unique reference.
+    _owned_closure: NonNullOwned<dyn Fn(*mut raw::nfc_tag_info_t) + Send + Sync>,
+}
+
+impl OnArrivalCallback {
+    fn new(cb: impl Fn(*mut raw::nfc_tag_info_t) + 'static + Send + Sync) -> Self {
+        let rust_closure_ptr = NonNullOwned::new(cb);
+
+        // SAFETY: the pointer derives from Box::into_raw via NonNullOwned, so
+        // it's valid. The referenced data allocation will remain valid until
+        // the closure is dropped.
+        let c_closure = Closure1::new(unsafe { rust_closure_ptr.0.as_ref() });
+        OnArrivalCallback {
+            c_closure,
+            // Re-wrap the pointer so that compiler can coerce <impl Fn()> to <dyn Fn()>
+            _owned_closure: NonNullOwned(rust_closure_ptr.0),
+        }
+    }
+
+    fn code_ptr(&self) -> unsafe extern "C" fn(*mut nfc_nci_sys::nfc_tag_info_t) {
+        // SAFETY: FnPtrX is a transparent wrapper around a raw pointer to a
+        // C and can be safely transmuted to the inner type
+        unsafe { std::mem::transmute(self.c_closure.code_ptr()) }
+    }
+}
+
+/// Self-referential struct to store the owned rust on-departure callback along
+/// with the c-closure containing reference to the callback.
 struct OnDepartureCallback {
     // Make sure c_closure is dropped before _rust_closure as it references it
     c_closure: Closure0<'static, ()>,
-    _rust_closure: AliasableBox<dyn Fn() + Send>,
-    // _pin: PhantomPinned,
+    _rust_closure: NonNullOwned<dyn Fn() + Send + Sync>,
+}
+impl OnDepartureCallback {
+    fn new(cb: impl Fn() + 'static + Send + Sync) -> Self {
+        let rust_closure_ptr = NonNullOwned::new(cb);
+
+        // SAFETY: the pointer derives from Box::into_raw via NonNullOwned, so
+        // it's valid. The referenced data allocation will remain valid until
+        // the closure is dropped.
+        let c_closure = Closure0::new(unsafe { rust_closure_ptr.0.as_ref() });
+        OnDepartureCallback {
+            c_closure,
+            // Re-wrap the pointer so that compiler can coerce <impl Fn()> to <dyn Fn()>
+            _rust_closure: NonNullOwned(rust_closure_ptr.0),
+        }
+    }
+
+    fn code_ptr(&self) -> unsafe extern "C" fn() {
+        // SAFETY: FnPtrX is a transparent wrapper around a raw pointer to a
+        // C and can be safely transmuted to the inner type
+        unsafe { std::mem::transmute(self.c_closure.code_ptr()) }
+    }
 }
 
-// SAFETY
-// These are "read only" except when created in register_tag_callbacks
-// The only thread that mutates anything is the NFC library thread.
+// SAFETY These structs are not automatically thread safe because they contain a
+// raw pointer and !Send + !Sync Closure type. However, the raw pointer is in a
+// private field and is never modified nor even accessed until drop. The Closure
+// is accessed from the extern C code (which spawns threads) but is never
+// modified.
 unsafe impl Send for OnArrivalCallback {}
 unsafe impl Send for OnDepartureCallback {}
 unsafe impl Sync for OnArrivalCallback {}
 unsafe impl Sync for OnDepartureCallback {}
 
+/// The NFC manager, which handles tag discovery and callbacks.
+///
+/// The methods are safe wrappers with native Rust types that mirror the C API.
+/// See the C API documentation for more details on the methods and function arguements.
 #[derive(Default)]
 pub struct NFCManager {
+    /// The tag callbacks - this should drop first as it can have fn ptrs to the
+    /// callbacks which are owned by the other structs
+    tag_callbacks: raw::nfcTagCallback_t,
     on_arrival: Option<OnArrivalCallback>,
     on_departure: Option<OnDepartureCallback>,
-    tag_callbacks: raw::nfcTagCallback_t,
 }
 
 impl NFCManager {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn initialize(&mut self) -> Result<()> {
+    /// Initializes the NFC manager.
+    pub fn initialize() -> Result<Self> {
         if unsafe { raw::nfcManager_doInitialize() } != 0 {
-            return Err(ManagerError("Initialization failed".into()));
+            return Err(NFCError::ManagerError("Initialization failed".into()));
         }
-        Ok(())
+        Ok(NFCManager::default())
     }
 
-    pub fn deinitialize(&mut self) -> Result<()> {
+    fn deinitialize(&mut self) -> Result<()> {
         if unsafe { raw::nfcManager_doDeinitialize() } != 0 {
-            return Err(ManagerError("Deinitialization failed".into()));
+            return Err(NFCError::ManagerError("Deinitialization failed".into()));
         }
         Ok(())
     }
 
+    /// Registers callbacks for tag arrival and departure.
     pub fn register_tag_callbacks(
         &mut self,
-        on_arrival: Option<impl Fn(NfcTag) + 'static + Send>,
-        on_departure: Option<impl Fn() + 'static + Send>,
+        on_arrival: Option<impl Fn(NfcTag) + 'static + Send + Sync>,
+        on_departure: Option<impl Fn() + 'static + Send + Sync>,
     ) {
         if let Some(cb) = on_arrival {
-            // SAFETY: tag_info is a raw pointer to a C struct provided by the
-            // NFC library. We count on them to assure it is non-null and
-            // aligned and can be dereferenced
-            let rust_closure_ptr = NonNull::new(Box::into_raw(Box::new(
-                move |tag_info: *mut raw::nfc_tag_info_t| cb(unsafe { (&*tag_info).into() }),
-            )))
-            .expect("Box::into_raw guarantees nonnull pointer");
+            let rust_callback =
+                OnArrivalCallback::new(move |tag_info: *mut raw::nfc_tag_info_t| {
+                    cb(unsafe { (&*tag_info).into() })
+                });
 
-            // SAFETY: the pointer derives from Box::into_raw, so it's valid.
-            // The referenced data is going to be boxed in a private field where
-            // it is not mutated and is freed after the c-closure
-            let c_closure = Closure1::new(unsafe { rust_closure_ptr.as_ref() });
-            let on_arrival = OnArrivalCallback {
-                c_closure,
-                // SAFETY: ptr is created by Box::into_raw above and is
-                // unaltered. We use AliasableBox to assert that the pointer is
-                // not "unique"
-                _rust_closure: AliasableBox::from_unique(unsafe {
-                    Box::from_raw(rust_closure_ptr.as_ptr())
-                }),
-                // _pin: PhantomPinned,
-            };
-
-            // SAFETY: Here we get a raw pointer to the C fn inside the
-            // c_closure. As long as c_closure exists, which it should because
-            // we're storing it in this struct, this address should be stable.
-            self.tag_callbacks.onTagArrival = unsafe {
-                Some(std::mem::transmute::<
-                    libffi::high::FnPtr1<'_, *mut nfc_nci_sys::nfc_tag_info_t, ()>,
-                    unsafe extern "C" fn(*mut nfc_nci_sys::nfc_tag_info_t),
-                >(*on_arrival.c_closure.code_ptr()))
-            };
-            self.on_arrival = Some(on_arrival);
+            self.tag_callbacks.onTagArrival = Some(rust_callback.code_ptr());
+            self.on_arrival = Some(rust_callback);
         }
         if let Some(cb) = on_departure {
-            let rust_closure_ptr = NonNull::new(Box::into_raw(Box::new(cb)))
-                .expect("Box::into_raw guarantees nonnull pointer");
-
-            // SAFETY: the pointer derives from Box::into_raw, so it's valid.
-            // The referenced data is going to be boxed in a private field where
-            // it is not mutated and is freed after the c-closure
-            let c_closure = Closure0::new(unsafe { rust_closure_ptr.as_ref() });
-            let on_departure = OnDepartureCallback {
-                c_closure,
-                // SAFETY: ptr is created by Box::into_raw above and is
-                // unaltered. We use AliasableBox to assert that the pointer is
-                // not "unique"
-                _rust_closure: AliasableBox::from_unique(unsafe {
-                    Box::from_raw(rust_closure_ptr.as_ptr())
-                }),
-                // _pin: PhantomPinned,
-            };
-            self.tag_callbacks.onTagDeparture = unsafe {
-                Some(std::mem::transmute::<
-                    libffi::high::FnPtr0<'_, ()>,
-                    unsafe extern "C" fn(),
-                >(*on_departure.c_closure.code_ptr()))
-            };
-            self.on_departure = Some(on_departure);
+            let rust_callback = OnDepartureCallback::new(cb);
+            self.tag_callbacks.onTagDeparture = Some(rust_callback.code_ptr());
+            self.on_departure = Some(rust_callback);
         }
 
+        // SAFETY: self.tag_callbacks contains valid pointers that will live
+        // until the nfcManager is de-initialized in the drop impl
         unsafe { raw::nfcManager_registerTagCallback(&mut self.tag_callbacks) };
     }
 
+    /// Enables tag discovery.
+    ///
+    /// `technology` is the technology to discover.
+    /// `reader_only_q` is whether the reader should only be used for reading (No P2P or HCE)
+    /// `enable_host_routing_q` indicates if enable host card emualtion
+    /// `force_restart_q` is whether the discovery should be forced to restart.
     pub fn enable_discovery(
         &mut self,
         technology: Option<NFATechnology>,
@@ -279,10 +409,12 @@ impl NFCManager {
         };
     }
 
+    /// Returns the number of tags currently connected.
     pub fn get_num_tags(&self) -> usize {
         unsafe { raw::nfcManager_getNumTags() as usize }
     }
 
+    /// Selects the next tag.
     pub fn get_next_tag(&self) -> Result<()> {
         if unsafe { raw::nfcManager_selectNextTag() } == 0 {
             Ok(())

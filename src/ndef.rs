@@ -1,3 +1,5 @@
+//! NDEF message encoding and decoding
+
 use bitflags::bitflags;
 use std::slice::Iter;
 
@@ -24,17 +26,22 @@ bitflags! {
     }
 }
 
+fn take_and_advance<'a>(iter: &mut Iter<'a, u8>, n: usize) -> Result<&'a [u8]> {
+    let slice = iter.as_slice();
+    if slice.len() < n {
+        return Err(NdefRecordInvalid);
+    }
+    let (result, remaining) = slice.split_at(n);
+    *iter = remaining.iter();
+    Ok(result)
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum NdefRecord {
     /// NDEF text: NFC Forum well-known type + RTD: 0x54
     Text { language_code: String, text: String },
     /// NDEF URL: NFC Forum well-known type + RTD: 0x55
     Url(String),
-}
-
-#[derive(Default, Debug, PartialEq)]
-pub struct NdefMessage {
-    pub records: Vec<NdefRecord>,
 }
 
 impl NdefRecord {
@@ -228,14 +235,9 @@ impl TryFrom<&mut Iter<'_, u8>> for NdefRecord {
     }
 }
 
-fn take_and_advance<'a>(iter: &mut Iter<'a, u8>, n: usize) -> Result<&'a [u8]> {
-    let slice = iter.as_slice();
-    if slice.len() < n {
-        return Err(NdefRecordInvalid);
-    }
-    let (result, remaining) = slice.split_at(n);
-    *iter = remaining.iter();
-    Ok(result)
+#[derive(Default, Debug, PartialEq)]
+pub struct NdefMessage {
+    pub records: Vec<NdefRecord>,
 }
 
 impl NdefMessage {

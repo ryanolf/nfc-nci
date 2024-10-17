@@ -21,10 +21,10 @@
 //!
 //! Then use the crate in your Rust code:
 //!
-//! ```rust
+//! ```no_run
 //! use nfc_nci::{NFCManager, NFATechnology};
 //!
-//! let mut manager = NFCManager::initialize()?;
+//! let mut manager = NFCManager::initialize().unwrap();
 //! let arrival_callback = move |_tag| {
 //!     println!("Tag arrived.");
 //! };

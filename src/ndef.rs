@@ -11,8 +11,47 @@ use crate::{
 const RTD_TEXT_FLAG_UTF16: u8 = 0x80;
 const RTD_TEXT_LC_LENGTH_MASK: u8 = 63;
 const RTD_TEXT: u8 = 0x54;
-const RTD_URL: u8 = 0x55;
+const RTD_URI: u8 = 0x55;
 const TNF_WELLKNOWN: u8 = 0x01;
+
+const URI_IDENTIFIER_CODES: [&str; 36] = [
+    "",
+    "http://www.",
+    "https://www.",
+    "http://",
+    "https://",
+    "tel:",
+    "mailto:",
+    "ftp://anonymous:anonymous@",
+    "ftp://ftp.",
+    "ftps://",
+    "sftp://",
+    "smb://",
+    "nfs://",
+    "ftp://",
+    "dav://",
+    "news:",
+    "telnet://",
+    "imap:",
+    "rtsp://",
+    "urn:",
+    "pop:",
+    "sip:",
+    "sips:",
+    "tftp:",
+    "btspp://",
+    "btl2cap://",
+    "btgoep://",
+    "tcpobex://",
+    "irdaobex://",
+    "file://",
+    "urn:epc:id:",
+    "urn:epc:tag:",
+    "urn:epc:pat:",
+    "urn:epc:raw:",
+    "urn:epc:",
+    "urn:nfc:",
+];
 
 bitflags! {
     #[derive(Default)]
@@ -36,6 +75,9 @@ fn take_and_advance<'a>(iter: &mut Iter<'a, u8>, n: usize) -> Result<&'a [u8]> {
     Ok(result)
 }
 
+/// NDEF record types
+///
+/// Presently supports text and URL records.
 #[derive(Debug, PartialEq, Clone)]
 pub enum NdefRecord {
     /// NDEF text: NFC Forum well-known type + RTD: 0x54
@@ -65,7 +107,12 @@ impl NdefRecord {
                 payload.extend_from_slice(language_code.as_bytes());
                 payload.extend_from_slice(text.as_bytes());
             }
-            NdefRecord::Url(_) => todo!(),
+            NdefRecord::Url(url) => {
+                let (identifier_code, uri) = Self::encode_uri(url);
+                payload = Vec::with_capacity(1 + uri.len());
+                payload.push(identifier_code);
+                payload.extend_from_slice(uri.as_bytes());
+            }
         }
         Ok(payload)
     }
@@ -76,7 +123,7 @@ impl NdefRecord {
                 language_code: _,
                 text: _,
             } => vec![RTD_TEXT],
-            NdefRecord::Url(_) => vec![RTD_URL],
+            NdefRecord::Url(_) => vec![RTD_URI],
         }
     }
 
@@ -164,6 +211,23 @@ impl NdefRecord {
             Ok(content)
         }
     }
+
+    fn encode_uri(url: &str) -> (u8, String) {
+        for (i, prefix) in URI_IDENTIFIER_CODES.iter().enumerate() {
+            if let Some(stripped) = url.strip_prefix(prefix) {
+                return (i as u8, stripped.to_string());
+            }
+        }
+        (0, url.to_string())
+    }
+
+    fn decode_uri(identifier_code: u8, uri: &str) -> String {
+        if identifier_code == 0 || identifier_code as usize >= URI_IDENTIFIER_CODES.len() {
+            uri.to_string()
+        } else {
+            format!("{}{}", URI_IDENTIFIER_CODES[identifier_code as usize], uri)
+        }
+    }
 }
 
 impl TryFrom<&mut Iter<'_, u8>> for NdefRecord {
@@ -221,7 +285,12 @@ impl TryFrom<&mut Iter<'_, u8>> for NdefRecord {
                         text,
                     })
                 }
-                [RTD_URL] => todo!(),
+                [RTD_URI] => {
+                    let identifier_code = *payload.first().ok_or(NdefRecordInvalid)?;
+                    let uri = std::str::from_utf8(&payload[1..]).or(Err(NdefRecordInvalid))?;
+                    let full_uri = Self::decode_uri(identifier_code, uri);
+                    Ok(NdefRecord::Url(full_uri))
+                }
                 _ => Err(NdefError(format!(
                     "Well known type {} not implemented",
                     String::from_utf8_lossy(payload_type)
@@ -386,6 +455,24 @@ mod tests {
         let content = msg.content()?;
         let msg2 = NdefMessage::from(content.as_slice());
         assert_eq!(msg2.records.len(), 3);
+        Ok(assert_eq!(msg, msg2))
+    }
+
+    #[test]
+    fn it_encodes_and_decodes_url_record() -> Result<()> {
+        let url = "https://www.nfc-forum.org";
+        let msg = NdefRecord::Url(url.to_string());
+        let content = msg.content(true, true)?;
+        let msg2 = NdefRecord::try_from(&mut content.iter())?;
+        Ok(assert_eq!(msg, msg2))
+    }
+
+    #[test]
+    fn it_handles_uri_with_no_abbreviation() -> Result<()> {
+        let url = "mms://example.com/download.wmv";
+        let msg = NdefRecord::Url(url.to_string());
+        let content = msg.content(true, true)?;
+        let msg2 = NdefRecord::try_from(&mut content.iter())?;
         Ok(assert_eq!(msg, msg2))
     }
 }
